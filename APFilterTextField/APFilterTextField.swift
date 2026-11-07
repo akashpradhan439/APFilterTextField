@@ -82,6 +82,12 @@ open class APFilterField: UITextField {
         didSet { floatingFilterView.numberOfCellsToShowInLandscape = numberOfCellsToShowInLandscape }
     }
     
+    /// Color for the user-typed portion in dropdown cells (default: gray).
+    /// The remaining predicted text uses the normal `fieldTextColor`.
+    @IBInspectable public var typeAheadHighlightColor: UIColor = .gray {
+        didSet { floatingFilterView.typeAheadHighlightColor = typeAheadHighlightColor }
+    }
+    
     // MARK: - Internal
     
     let floatingFilterView = FloatingFilterView()
@@ -128,6 +134,7 @@ open class APFilterField: UITextField {
         floatingFilterView.dropdownBorderColor = dropdownBorderColor
         floatingFilterView.numberOfCellsToShow = numberOfCellsToShow
         floatingFilterView.numberOfCellsToShowInLandscape = numberOfCellsToShowInLandscape
+        floatingFilterView.typeAheadHighlightColor = typeAheadHighlightColor
         
         floatingFilterView.delegate = self
         setupKeyboardObservers()

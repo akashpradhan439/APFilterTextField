@@ -42,6 +42,11 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
     var font: UIFont = .systemFont(ofSize: 15, weight: .regular)
     var textColor: UIColor = .init(red: 26/255, green: 23/255, blue: 38/255, alpha: 1.0)
     var separatorColor: UIColor = .init(red: 236/255, green: 234/255, blue: 242/255, alpha: 1.0)
+    var dropdownShadowColor: UIColor = .black
+    var dropdownShadowOpacity: Float = 0.22
+    var dropdownShadowRadius: CGFloat = 5
+    var dropdownShadowOffset: CGSize = CGSize(width: 0, height: 2)
+    var typeAheadHighlightColor: UIColor = .gray
     
     private(set) var isOpen = false
     
@@ -49,11 +54,13 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
     
     private var options: [FieldOption] = []
     private var filteredOptions: [FieldOption] = []
+    private var currentFilterText: String = ""
     private weak var anchorView: UIView?
     private var containerView: UIView?
     private var containerTapGesture: UITapGestureRecognizer?
     private var containerPanGesture: UIPanGestureRecognizer?
     private var heightConstraint: NSLayoutConstraint?
+    private var shadowHeightConstraint: NSLayoutConstraint?
     private var topConstraint: NSLayoutConstraint?
     private var bottomConstraint: NSLayoutConstraint?
     private var leadingConstraint: NSLayoutConstraint?
@@ -70,41 +77,89 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
 #endif
     
     private let gap: CGFloat = 4
-    private let arrowSize: CGFloat = 10
+    private let arrowSize: CGFloat = 14
+    
+    private lazy var shadowBackingView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .white
+        view.layer.cornerRadius = dropdownCornerRadius
+        view.layer.shadowColor = dropdownShadowColor.cgColor
+        view.layer.shadowOpacity = dropdownShadowOpacity
+        view.layer.shadowRadius = dropdownShadowRadius
+        view.layer.shadowOffset = dropdownShadowOffset
+        view.clipsToBounds = false
+        view.isUserInteractionEnabled = false
+        return view
+    }()
     
     private lazy var arrowView: UIView = {
         let size = arrowSize
-        let view = UIView(frame: CGRect(x: 0, y: 0, width: size * 2, height: size))
+        let width = size * 2
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: width, height: size))
         view.translatesAutoresizingMaskIntoConstraints = false
         view.backgroundColor = .clear
         
-        let shapeLayer = CAShapeLayer()
-        shapeLayer.fillColor = UIColor.white.cgColor
-        shapeLayer.strokeColor = dropdownBorderColor.cgColor
-        shapeLayer.lineWidth = dropdownBorderWidth
+        let tipRadius: CGFloat = size * 0.3  // rounding at the tip
+        
+        // Build path: triangle with rounded tip, sharp bottom corners
+        func buildPath() -> UIBezierPath {
+            let p = UIBezierPath()
+            
+            // Start at bottom-left corner (sharp)
+            p.move(to: CGPoint(x: 0, y: size))
+            
+            // Left edge straight up toward the tip
+            p.addLine(to: CGPoint(x: size - tipRadius, y: tipRadius * 0.55))
+            
+            // Rounded tip
+            p.addQuadCurve(
+                to: CGPoint(x: size + tipRadius, y: tipRadius * 0.55),
+                controlPoint: CGPoint(x: size, y: -tipRadius * 0.35)
+            )
+            
+            // Right edge straight down to bottom-right corner (sharp)
+            p.addLine(to: CGPoint(x: width, y: size))
+            
+            return p
+        }
+        
+        // Closed path for fill and shadow
+        let fillPath = buildPath()
+        fillPath.close()
+        
+        // Fill layer — closed path, no stroke
+        let fillLayer = CAShapeLayer()
+        fillLayer.fillColor = UIColor.white.cgColor
+        fillLayer.strokeColor = nil
+        fillLayer.path = fillPath.cgPath
+        
+        // Open path for stroke — only the side edges and tip, no bottom line
+        let strokePath = buildPath()
+        // NOT closed — bottom edge has no stroke
+        
+        // Stroke layer — open path, no fill
+        let strokeLayer = CAShapeLayer()
+        strokeLayer.fillColor = nil
+        strokeLayer.strokeColor = dropdownBorderColor.cgColor
+        strokeLayer.lineWidth = dropdownBorderWidth
 #if swift(>=4.2)
-        shapeLayer.lineJoin = .round
-        shapeLayer.lineCap = .round
+        strokeLayer.lineJoin = .round
+        strokeLayer.lineCap = .round
 #else
-        shapeLayer.lineJoin = kCALineJoinRound
-        shapeLayer.lineCap = kCALineCapRound
+        strokeLayer.lineJoin = kCALineJoinRound
+        strokeLayer.lineCap = kCALineCapRound
 #endif
+        strokeLayer.path = strokePath.cgPath
         
-        let path = UIBezierPath()
-        path.move(to: CGPoint(x: 0, y: size))
-        path.addLine(to: CGPoint(x: size, y: 0))
-        path.addLine(to: CGPoint(x: size * 2, y: size))
-        path.close()
-        shapeLayer.path = path.cgPath
-        
-        view.layer.addSublayer(shapeLayer)
+        view.layer.addSublayer(fillLayer)
+        view.layer.addSublayer(strokeLayer)
         
         return view
     }()
     
     internal var effectiveMaxHeight: CGFloat {
-        let traits = anchorView?.window?.traitCollection ?? traitCollection
-        let isLandscape: Bool = traits.verticalSizeClass == .compact && traits.horizontalSizeClass == .compact
+        let isLandscape: Bool = UIApplication.shared.statusBarOrientation.isLandscape
         let count = isLandscape ? numberOfCellsToShowInLandscape : numberOfCellsToShow
         return count * rowHeight
     }
@@ -157,6 +212,7 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
     }
     
     func filter(with text: String) {
+        currentFilterText = text
         if !text.isEmpty {
             filteredOptions = options.filter { $0.value.localizedCaseInsensitiveContains(text) }
         }else {
@@ -192,11 +248,21 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
         container.addGestureRecognizer(pan)
         self.containerPanGesture = pan
         
+        container.addSubview(shadowBackingView)
         container.addSubview(tableView)
         container.addSubview(arrowView)
         window.addSubview(container)
         
         applyPositionConstraints()
+        
+        // Pin shadow backing to match tableView edges
+        NSLayoutConstraint.activate([
+            shadowBackingView.topAnchor.constraint(equalTo: tableView.topAnchor),
+            shadowBackingView.leadingAnchor.constraint(equalTo: tableView.leadingAnchor),
+            shadowBackingView.trailingAnchor.constraint(equalTo: tableView.trailingAnchor),
+        ])
+        shadowHeightConstraint = shadowBackingView.heightAnchor.constraint(equalTo: tableView.heightAnchor)
+        shadowHeightConstraint?.isActive = true
         
         let minWidth = tableView.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
         minWidth.isActive = true
@@ -209,9 +275,11 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
         
         tableView.alpha = 0
         arrowView.alpha = 0
+        shadowBackingView.alpha = 0
         UIView.animate(withDuration: 0.2, animations: {
             self.tableView.alpha = 1
             self.arrowView.alpha = 1
+            self.shadowBackingView.alpha = 1
         }, completion: { [weak self] _ in
             guard let strongSelf = self else { return }
             strongSelf.delegate?.floatingFilterDidShow(strongSelf)
@@ -226,6 +294,7 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
         UIView.animate(withDuration: 0.15, animations: {
             self.tableView.alpha = 0
             self.arrowView.alpha = 0
+            self.shadowBackingView.alpha = 0
         }, completion: { [weak self] _ in
             guard let strongSelf = self, strongSelf.containerView === containerSnapshot else { return }
             strongSelf.teardownContainer()
@@ -260,6 +329,7 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
             leadingConstraint,
             trailingConstraint,
             heightConstraint,
+            shadowHeightConstraint,
             minWidthConstraint
         ].compactMap { $0 })
 #else
@@ -269,6 +339,7 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
             leadingConstraint,
             trailingConstraint,
             heightConstraint,
+            shadowHeightConstraint,
             minWidthConstraint
         ].flatMap { $0 })
 #endif
@@ -277,6 +348,7 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
         containerTapGesture = nil
         containerPanGesture = nil
         heightConstraint = nil
+        shadowHeightConstraint = nil
         topConstraint = nil
         bottomConstraint = nil
         leadingConstraint = nil
@@ -319,7 +391,8 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
             top.isActive = true
             topConstraint = top
             
-            let arrowTop = arrowView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: anchorFrame.maxY + gap - arrowSize)
+            // Overlap arrow into table by borderWidth so arrow fill covers the table's top border
+            let arrowTop = arrowView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: anchorFrame.maxY + gap - arrowSize + dropdownBorderWidth)
             arrowTop.isActive = true
             arrowTopConstraint = arrowTop
             
@@ -330,7 +403,8 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
             bottom.isActive = true
             bottomConstraint = bottom
             
-            let arrowBottom = arrowView.bottomAnchor.constraint(equalTo: containerView.topAnchor, constant: anchorFrame.minY - gap + arrowSize)
+            // Overlap arrow into table by borderWidth so arrow fill covers the table's bottom border
+            let arrowBottom = arrowView.bottomAnchor.constraint(equalTo: containerView.topAnchor, constant: anchorFrame.minY - gap + arrowSize - dropdownBorderWidth)
             arrowBottom.isActive = true
             arrowBottomConstraint = arrowBottom
             
@@ -364,11 +438,18 @@ final class FloatingFilterView: UIView, UIGestureRecognizerDelegate {
     private func updateHeight(animated: Bool = true) {
         let target = tableViewHeight
         heightConstraint?.constant = target
+        let shouldHide = target == 0
         if animated {
             UIView.animate(withDuration: 0.2) {
+                self.arrowView.alpha = shouldHide ? 0 : 1
+                self.tableView.alpha = shouldHide ? 0 : 1
+                self.shadowBackingView.alpha = shouldHide ? 0 : 1
                 self.containerView?.layoutIfNeeded()
             }
         } else {
+            self.arrowView.alpha = shouldHide ? 0 : 1
+            self.tableView.alpha = shouldHide ? 0 : 1
+            self.shadowBackingView.alpha = shouldHide ? 0 : 1
             self.containerView?.layoutIfNeeded()
         }
     }
@@ -447,9 +528,28 @@ extension FloatingFilterView: UITableViewDataSource, UITableViewDelegate {
     
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "FloatingOptionCell", for: indexPath)
-        cell.textLabel?.text = filteredOptions[indexPath.row].value
-        cell.textLabel?.font = font
-        cell.textLabel?.textColor = textColor
+        let optionValue = filteredOptions[indexPath.row].value
+        
+        if !currentFilterText.isEmpty,
+           let matchRange = optionValue.range(of: currentFilterText, options: .caseInsensitive) {
+            let attributed = NSMutableAttributedString(
+                string: optionValue,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: textColor
+                ]
+            )
+            // Gray out the typed (matched) portion
+            let nsRange = NSRange(matchRange, in: optionValue)
+            attributed.addAttribute(.foregroundColor, value: typeAheadHighlightColor, range: nsRange)
+            cell.textLabel?.attributedText = attributed
+        } else {
+            cell.textLabel?.attributedText = nil
+            cell.textLabel?.text = optionValue
+            cell.textLabel?.font = font
+            cell.textLabel?.textColor = textColor
+        }
+        
         cell.selectionStyle = .default
         return cell
     }
